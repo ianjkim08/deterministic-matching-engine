@@ -13,7 +13,7 @@ network-to-network latency.
 - Timed workload: alternating resting limit sell and crossing IOC buy
 - Timed operations per trial: 20,000,000 after 200,000 warmup operations
 - Latency sample count: 200,000 per trial; `steady_clock` overhead included
-- Journaling and SPSC transport: excluded from this matching-core measurement
+- Journaling and SPSC transport: excluded from this historical matching-core measurement
 
 ## Repeat trials
 
@@ -36,16 +36,42 @@ to 100 ns increments, so these figures should not be used to distinguish sub-100
 changes. An isolated Linux core with a controlled frequency policy is recommended
 for publication-quality comparative measurements.
 
+## Expanded workload audit
+
+The benchmark executable also contains independent scenarios for insert/cancel,
+replace, nine-level sweeps, mixed order lifecycles, protocol coding, SPSC transport,
+and journal appends. Three pinned 2,000,000-operation audit runs on the same system
+produced these medians:
+
+| Workload | Median ops/s | Worst-run p99.9 |
+|---|---:|---:|
+| Crossing IOC | 18,971,552 | 600 ns |
+| Insert/cancel churn | 21,335,951 | 500 ns |
+| Replace priority churn | 16,624,593 | 200 ns |
+| Nine-level market sweep | 11,669,170 | 1,000 ns |
+| Mixed lifecycle | 20,726,055 | 500 ns |
+| Protocol encode + decode | 52,601,817 | not sampled |
+| SPSC cross-thread transfer | 140,112,931 | not sampled |
+| Buffered journal append | 6,450,348 | not sampled |
+
+These short audit runs broaden workload coverage; they do not replace the longer
+nine-trial historical result above. Protocol, SPSC, and journal rows report
+throughput only. Journal append is buffered and does not imply physical-media
+durability.
+
 ## Correctness verification
 
-- Optimized suite: 11/11 tests passed
-- UndefinedBehaviorSanitizer suite: 11/11 tests passed
-- AddressSanitizer + UndefinedBehaviorSanitizer suite: 11/11 tests passed
+- Focused optimized suite: 15/15 tests passed
+- Differential suite: 50,000 commands matched an independent reference model
+- Malformed-frame suite: 100,000 randomized inputs completed without failure
+- Linux CI additionally runs fragmented OS-stream gateway integration
+- AddressSanitizer + UndefinedBehaviorSanitizer run across all Linux tests in CI
 
 Coverage includes price-time priority, best-price selection, partial fills,
 cancel/replace priority, IOC/FOK behavior, sequence and duplicate rejection,
 snapshot replacement and recovery, incompatible/torn journal handling, journal
-replay, cross-thread SPSC ordering, and runner output.
+replay, cross-thread SPSC ordering, protocol validation, risk/session sequencing,
+runner correlation, randomized differential behavior, and stream fragmentation.
 
 ## Supported performance statement
 
@@ -55,6 +81,6 @@ and 600 ns worst-trial p99.9**, across nine pinned 20M-operation trials on the n
 system. The full observed throughput range should remain available alongside that
 statement.
 
-This must not be described as end-to-end order latency without implementing and
-measuring network input, decoding, risk, durable synchronization, response encoding,
-and network output.
+This must not be described as end-to-end order latency. The repository now provides
+network input, decoding, risk, response encoding, and network output, but it does
+not publish a controlled client-to-client or durable-ack latency experiment.

@@ -32,7 +32,10 @@ enum class RejectReason : std::uint8_t {
     UnknownOrderId,
     BookCapacity,
     WouldNotFill,
-    SequenceGap
+    SequenceGap,
+    InvalidSessionSequence,
+    RiskLimit,
+    GatewayBackpressure
 };
 
 struct Command {
