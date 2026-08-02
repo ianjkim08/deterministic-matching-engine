@@ -1,11 +1,11 @@
 # Deterministic Matching Engine
 
-A dependency-free C++20 limit-order-book and matching-engine core built for
-deterministic behavior, bounded memory use, and reproducible latency measurement.
+A dependency-free C++20 limit-order-book, matching engine, and Linux TCP gateway
+built for deterministic behavior, bounded memory use, and reproducible measurement.
 
-This is an educational systems project, not a production exchange. Its benchmark
-measures the in-process matching path only; it does not include a network gateway,
-wire decoding, pre-trade risk, durable media synchronization, or response encoding.
+This is an educational systems project, not a production exchange. It includes an
+end-to-end reference path, but its reported latency numbers remain component
+microbenchmarks rather than network round-trip measurements.
 
 ## Highlights
 
@@ -17,6 +17,10 @@ wire decoding, pre-trade risk, durable media synchronization, or response encodi
 - Intrusive FIFO queues and contiguous price ladders
 - Active-price bitmaps for bounded best-bid/best-ask discovery
 - Strict command sequencing and explicit rejection reasons
+- Versioned little-endian binary protocol with streaming frame validation
+- Linux `epoll` TCP gateway with bounded receive/transmit buffers
+- Per-session sequence enforcement, pre-trade quantity/price/notional limits, and
+  explicit input-queue backpressure rejection
 - Cache-line-separated SPSC queues with explicit output backpressure
 - Checksummed command journal, torn-record detection, snapshots, and replay
 - CMake builds on Linux and Windows with no third-party runtime dependencies
@@ -28,19 +32,21 @@ largest expected sweep if heap allocation is prohibited on the calling path.
 ## Architecture
 
 ```text
- gateway / command producer
-            |
-       SPSC command queue
-            |
-     single-writer runner ----> command journal
-            |
-       matching engine
-       /      |       \
-  bid/ask   order-ID   event generation
-  ladders    index            |
-                         SPSC event queue
-                                |
-                        publisher / consumer
+ TCP clients
+     |
+ epoll gateway -- decode / session sequence / risk
+     |
+ bounded SPSC request queue
+     |
+ single-writer runner ----> optional command journal
+     |
+ matching engine
+  /      |       \
+ ladders order-ID  deterministic events
+                    |
+              bounded SPSC response queue
+                    |
+          encode / per-session TCP routing
 ```
 
 The book is deliberately single-writer. Gateway and publication work can run on
@@ -61,7 +67,8 @@ Linux:
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build --parallel
 ctest --test-dir build --output-on-failure
-./build/dme_bench 10000000 2
+./build/dme_bench all 2000000 2
+./build/dme_gateway 9001
 ```
 
 Windows from a Visual Studio developer shell:
@@ -70,11 +77,17 @@ Windows from a Visual Studio developer shell:
 cmake -S . -B build -A x64
 cmake --build build --config Release
 ctest --test-dir build -C Release --output-on-failure
-.\build\Release\dme_bench.exe 10000000 2
+.\build\Release\dme_bench.exe all 2000000 2
 ```
 
-The benchmark arguments are `[operation-count] [logical-cpu]`. It reports whether
-thread affinity succeeded.
+The benchmark arguments are `[scenario] [operation-count] [logical-cpu]`, where
+`scenario` is `all`, `cross`, `cancel`, `replace`, `sweep`, `mixed`, `protocol`,
+`spsc`, or `journal`. The historical numeric-only form still runs `cross`.
+
+`dme_gateway` is Linux-only and listens on all interfaces. The first valid frame on
+a connection binds its nonzero session ID; client sequences then begin at 1 and
+must be contiguous. See [docs/PROTOCOL.md](docs/PROTOCOL.md) for the exact wire
+layout and rejection behavior.
 
 ## Minimal API example
 
@@ -109,10 +122,11 @@ p99.9**, with zero benchmark rejects.
 See [BENCHMARK_RESULTS.md](BENCHMARK_RESULTS.md) for the exact environment, flags,
 workload, all repeat trials, and interpretation limits.
 
-The benchmark alternates a resting limit sell with a crossing IOC buy. It exercises
-insertion, best-price discovery, matching, removal, order-ID maintenance, and event
-generation. Workload construction, startup allocation, and warmup are outside the
-timed throughput loop. The latency pass includes `steady_clock` measurement cost.
+The benchmark suite now measures crossing IOC, insert/cancel churn, replacement,
+nine-level market sweeps, mixed lifecycle traffic, protocol codec throughput,
+cross-thread SPSC transfer, and buffered journal append. Workload construction,
+startup allocation, and warmup are outside timed engine loops. The latency pass
+includes `steady_clock` measurement cost.
 
 These values are **matching-core microbenchmark results**, not network-to-network
 order latency. Results on another CPU, compiler, operating system, power policy, or
@@ -147,7 +161,12 @@ The test suite covers:
 - capacity, duplicate-ID, and sequence-gap rejection;
 - matching executable orders while resting capacity is full;
 - snapshot and journal round trips;
-- cross-thread SPSC ordering and runner event delivery.
+- cross-thread SPSC ordering and runner event delivery;
+- binary protocol round trips, fragmented input, and malformed-field rejection;
+- session sequencing, overflow-safe risk limits, and gateway event correlation;
+- 50,000-command differential comparison against an independent reference book;
+- 100,000 randomized malformed protocol frames;
+- fragmented bidirectional OS stream transport on Linux.
 
 Sanitizer build:
 
@@ -166,8 +185,9 @@ AddressSanitizer/UndefinedBehaviorSanitizer job on Linux.
 ```text
 include/dme/   public headers and data structures
 src/           matching and persistence implementations
-apps/          benchmark and journal-replay executables
-tests/         dependency-free correctness test suite
+apps/          benchmark, replay, and Linux TCP gateway executables
+tests/         focused, differential, fuzz-style, and socket integration tests
+docs/          binary protocol specification
 scripts/       reproducible Linux benchmark helper
 ```
 
@@ -178,8 +198,12 @@ scripts/       reproducible Linux benchmark helper
 - FOK validation may walk multiple eligible price levels.
 - The fixed order capacity and price range are chosen at construction.
 - The journal checksum detects accidental corruption; it is not cryptographic.
-- There is no authentication, authorization, network protocol, or pre-trade risk
-  layer in this repository.
+- The TCP gateway has no TLS, authentication, authorization, DDoS controls, kernel
+  bypass, multi-process failover, or production observability.
+- Gateway risk limits are fixed defaults in the reference executable; a deployment
+  would load per-account policy from controlled configuration.
+- Published latency percentiles are in-process measurements, not wire-to-wire or
+  durable-ack latency.
 
 ## Contributing and license
 

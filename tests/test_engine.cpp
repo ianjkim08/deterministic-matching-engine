@@ -1,11 +1,15 @@
 #include "dme/engine_runner.hpp"
+#include "dme/gateway.hpp"
 #include "dme/journal.hpp"
+#include "dme/protocol.hpp"
 #include "dme/spsc_queue.hpp"
 
 #include <atomic>
+#include <array>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <string_view>
 #include <thread>
@@ -217,6 +221,101 @@ void engine_runner_preserves_output() {
     CHECK(received[3].type == dme::EventType::Trade);
 }
 
+void protocol_round_trips_and_handles_fragmentation() {
+    const std::vector<dme::Command> commands{
+        order(0, 11, dme::Side::Buy, 101, 7),
+        {0, dme::CommandType::Cancel, dme::Side::Buy, dme::OrderType::Limit, 0, 11, 0, 0},
+        {0, dme::CommandType::Replace, dme::Side::Sell, dme::OrderType::Limit, 0, 11, 102, 9}
+    };
+    std::array<std::byte, dme::protocol::maximum_frame_size> buffer{};
+    std::uint64_t sequence = 1;
+    for (const auto& command : commands) {
+        const dme::protocol::Request request{42, sequence++, command};
+        std::size_t written{};
+        CHECK(dme::protocol::encode_request(request, buffer, written));
+        for (std::size_t size = 0; size < written; ++size) {
+            CHECK(dme::protocol::decode_request({buffer.data(), size}).status ==
+                  dme::protocol::DecodeStatus::NeedMoreData);
+        }
+        const auto decoded = dme::protocol::decode_request({buffer.data(), written});
+        CHECK(decoded.status == dme::protocol::DecodeStatus::Ok);
+        CHECK(decoded.bytes_consumed == written);
+        CHECK(decoded.request.session_id == request.session_id);
+        CHECK(decoded.request.client_sequence == request.client_sequence);
+        CHECK(decoded.request.command.type == command.type);
+        CHECK(decoded.request.command.order_id == command.order_id);
+        CHECK(decoded.request.command.price == command.price);
+        CHECK(decoded.request.command.quantity == command.quantity);
+    }
+
+    dme::Event event{99, dme::EventType::Trade, dme::Side::Buy, dme::RejectReason::None,
+                     0, 11, 12, 101, 5};
+    std::size_t written{};
+    CHECK(dme::protocol::encode_response({42, 4, event}, buffer, written));
+    const auto response = dme::protocol::decode_response({buffer.data(), written});
+    CHECK(response.status == dme::protocol::DecodeStatus::Ok);
+    CHECK(response.response.session_id == 42 && response.response.client_sequence == 4);
+    CHECK(response.response.event.sequence == 99 && response.response.event.contra_order_id == 12);
+}
+
+void protocol_rejects_malformed_frames() {
+    std::array<std::byte, dme::protocol::maximum_frame_size> buffer{};
+    std::size_t written{};
+    CHECK(dme::protocol::encode_request({7, 1, order(0, 1, dme::Side::Buy, 100, 2)},
+                                        buffer, written));
+    auto corrupted = buffer;
+    corrupted[0] ^= std::byte{0xff};
+    CHECK(dme::protocol::decode_request({corrupted.data(), written}).status ==
+          dme::protocol::DecodeStatus::InvalidMagic);
+    corrupted = buffer;
+    corrupted[4] = std::byte{99};
+    CHECK(dme::protocol::decode_request({corrupted.data(), written}).status ==
+          dme::protocol::DecodeStatus::UnsupportedVersion);
+    corrupted = buffer;
+    corrupted[5] = std::byte{99};
+    CHECK(dme::protocol::decode_request({corrupted.data(), written}).status ==
+          dme::protocol::DecodeStatus::UnknownMessageType);
+    corrupted = buffer;
+    corrupted[dme::protocol::header_size] = std::byte{9};
+    CHECK(dme::protocol::decode_request({corrupted.data(), written}).status ==
+          dme::protocol::DecodeStatus::InvalidField);
+}
+
+void session_sequence_and_risk_validation() {
+    dme::SessionValidator validator(42, {100, 1'000, 50'000});
+    auto request = dme::protocol::Request{42, 1, order(0, 1, dme::Side::Buy, 100, 10)};
+    CHECK(validator.validate_and_advance(request) == dme::RejectReason::None);
+    CHECK(validator.next_client_sequence() == 2);
+    CHECK(validator.validate_and_advance(request) == dme::RejectReason::InvalidSessionSequence);
+    request.client_sequence = 2;
+    request.command.quantity = 101;
+    CHECK(validator.validate_and_advance(request) == dme::RejectReason::RiskLimit);
+    request.client_sequence = 3;
+    request.command.quantity = std::numeric_limits<dme::Quantity>::max();
+    request.command.price = std::numeric_limits<dme::Price>::max();
+    CHECK(validator.validate_and_advance(request) == dme::RejectReason::RiskLimit);
+}
+
+void gateway_runner_correlates_events() {
+    dme::OrderBook book({90, 110, 1, 32});
+    dme::SpscQueue<dme::GatewayRequest> input(16);
+    dme::SpscQueue<dme::GatewayResponse> output(32);
+    std::atomic<bool> stop{false};
+    dme::GatewayEngineRunner runner(book, input, output);
+    std::thread core([&] { runner.run(stop); });
+    CHECK(input.try_push({77, 9, order(0, 123, dme::Side::Sell, 100, 5)}));
+    std::vector<dme::GatewayResponse> received;
+    while (received.size() < 2) {
+        dme::GatewayResponse response{};
+        if (output.try_pop(response)) received.push_back(response);
+    }
+    stop.store(true, std::memory_order_release);
+    core.join();
+    CHECK(received[0].session_id == 77 && received[0].client_sequence == 9);
+    CHECK(received[0].event.sequence == 1 && received[0].event.type == dme::EventType::Accepted);
+    CHECK(received[1].event.type == dme::EventType::Rested);
+}
+
 } // namespace
 
 int main() {
@@ -232,7 +331,11 @@ int main() {
         {"journal_round_trip", journal_round_trip},
         {"journal_rejects_bad_header_and_detects_torn_tail", journal_rejects_bad_header_and_detects_torn_tail},
         {"queue_orders_cross_thread", queue_orders_cross_thread},
-        {"engine_runner_preserves_output", engine_runner_preserves_output}
+        {"engine_runner_preserves_output", engine_runner_preserves_output},
+        {"protocol_round_trips_and_handles_fragmentation", protocol_round_trips_and_handles_fragmentation},
+        {"protocol_rejects_malformed_frames", protocol_rejects_malformed_frames},
+        {"session_sequence_and_risk_validation", session_sequence_and_risk_validation},
+        {"gateway_runner_correlates_events", gateway_runner_correlates_events}
     };
     std::size_t failures = 0;
     for (const auto& test : tests) {
