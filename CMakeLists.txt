@@ -12,7 +12,8 @@ option(DME_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
 
 function(dme_enable_warnings target)
     target_compile_options(${target} PRIVATE
-        $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive->
+        # C4324 reports the intentional cache-line padding around SPSC indices.
+        $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive- /wd4324>
         $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall -Wextra -Wpedantic -Wconversion>
     )
     if(DME_WARNINGS_AS_ERRORS)
