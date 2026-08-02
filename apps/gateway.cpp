@@ -31,6 +31,7 @@ void on_signal(int) { interrupted = 1; }
 constexpr std::size_t receive_capacity = 64U * 1024U;
 constexpr std::size_t transmit_capacity = 256U * 1024U;
 constexpr int maximum_events = 128;
+constexpr dme::BookConfig gateway_book_config{9'000, 11'000, 1, 1'000'000};
 
 struct Connection {
     explicit Connection(int socket_fd) : fd(socket_fd) {}
@@ -52,7 +53,7 @@ bool set_nonblocking(int fd) {
 class TcpGateway {
 public:
     explicit TcpGateway(std::uint16_t port)
-        : port_(port), book_({1, 1'000'000'000, 1, 1'000'000}),
+        : port_(port), book_(gateway_book_config),
           requests_(65'536), responses_(262'144), runner_(book_, requests_, responses_) {}
 
     ~TcpGateway() {

@@ -53,6 +53,10 @@ The book is deliberately single-writer. Gateway and publication work can run on
 separate threads, while instruments can be sharded across independent book-owning
 cores.
 
+See [docs/DESIGN.md](docs/DESIGN.md) for the full invariants, memory and
+concurrency model, complexity bounds, failure semantics, recovery procedure,
+engineering tradeoffs, and claim-to-evidence matrix.
+
 ## Quick start
 
 Requirements:
