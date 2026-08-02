@@ -1,0 +1,12 @@
+/build*/
+/cmake-build-*/
+.cache/
+.idea/
+.vscode/
+*.journal
+*.snapshot
+*.tmp
+*.exe
+*.obj
+*.pdb
+.DS_Store
